@@ -1,0 +1,5 @@
+.cache/
+build.sh
+compile_commands.json
+main
+main.c

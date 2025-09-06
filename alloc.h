@@ -29,7 +29,7 @@ typedef struct arena_block arena_block_t ;
 struct arena_block {
     arena_block_t *next;
     size_t size, used;
-    uint8_t *bytes;
+    uint8_t bytes[];
 };
 
 #ifndef ALLOC_ARENA_BLOCKSIZE_MIN
@@ -41,7 +41,7 @@ struct arena_block {
 
 typedef struct arena {
     arena_block_t *blocks;
-    size_t block_count;
+    size_t block_seq;
 } arena_t;
 
 /* alloc and free function pointers */
@@ -98,15 +98,12 @@ void allocator_dump_stats(allocator_t *a, const char* name) {
 /* arena allocator functions */
 static arena_block_t *arena_block_alloc(size_t size) {
     size_t size_bytes = sizeof(arena_block_t) + sizeof(uint8_t) * size;
-    arena_block_t *block = (arena_block_t*)calloc(size_bytes, sizeof(uint8_t));
+    arena_block_t *block = (arena_block_t*)calloc(1, size_bytes);
     assert(block != NULL);
 
     block->next = NULL;
     block->size = size;
     block->used = 0;
-    block->bytes = (uint8_t*)(
-        (uintptr_t)block + (uintptr_t)(size_bytes - sizeof(uint8_t) * size)
-    );
     return block;
 }
 
@@ -122,7 +119,7 @@ void allocator_arena_init(allocator_t *a) {
         .free = allocator_arena_reset,
         .arena = {
             .blocks      = NULL,
-            .block_count = 0,
+            .block_seq = 0,
         },
         .stats = {
             .peak     = 0,
@@ -153,7 +150,7 @@ void allocator_arena_free(allocator_t *a) {
     }
 
     arena->blocks = NULL;
-    arena->block_count = 0;
+    arena->block_seq = 0;
 }
 
 void *allocator_arena_alloc(allocator_t *a, size_t size) {
@@ -163,20 +160,19 @@ void *allocator_arena_alloc(allocator_t *a, size_t size) {
     size = round_up_to_multiple(size, MAX_ALIGN);
     arena_block_t *block = arena->blocks;
     while (block) {
-        arena_block_t *next = block->next;
         if (size + block->used <= block->size) {
             /* found block that can hold the memory */
             /* this helps not to allocate more blocks for small allocations */
             break;
         }
-        block = next;
+        block = block->next;
     }
 
     /* did not find a suitable block */
     if (!block) {
         /* from https://github.com/nothings/stb/blob/master/stb_ds.h */
         // compute the next blocksize
-        size_t blocksize = arena->block_count;
+        size_t blocksize = arena->block_seq;
 
         // size is 512, 512, 1024, 1024, 2048, 2048, 4096, 4096, etc., so that
         // there are log(SIZE) allocations to free when we destroy the table
@@ -184,7 +180,7 @@ void *allocator_arena_alloc(allocator_t *a, size_t size) {
 
         // if size is under 1M, advance to next blocktype
         if (blocksize < (size_t)(ALLOC_ARENA_BLOCKSIZE_MAX))
-          ++arena->block_count;
+          ++arena->block_seq;
         /*************************************************************/
 
         /* allocate next block */
@@ -205,9 +201,7 @@ void *allocator_arena_alloc(allocator_t *a, size_t size) {
             block = arena->blocks;
         } else {
             arena_block_t *last = arena->blocks;
-            while (last->next) {
-                last = last->next;
-            }
+            while (last->next) last = last->next;
             last->next = new_block;
             block = last->next;
         }
@@ -248,7 +242,7 @@ static void allocator_arena_dump(allocator_t *a, int verbose) {
     assert(a->kind == ALLOCATOR_KIND_ARENA);
 
     arena_t *arena = &a->arena;
-    size_t block_count = arena->block_count;
+    size_t block_count = arena->block_seq;
     if (block_count < 1) {
         printf("ARENA is EMPTY!\n");
     }

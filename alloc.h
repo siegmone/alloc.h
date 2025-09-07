@@ -8,22 +8,24 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+/* TODO(September 07, 2025): replace all asserts with logging and early safe returns */
+/* TODO(September 07, 2025): shorten the 'allocator_' prefix of functions, like 'alloc_' or even 'a_' or 'alc_' */
+/* TODO(September 07, 2025): add 'realloc' for all types of allocators */
+
 /* define alignment size */
 #define MAX_ALIGN (alignof(max_align_t))
 
-/* Allocators */
-typedef struct allocator allocator_t;
+/* helper macros */
+#define round_up_to_multiple(_n, _m) ({    \
+    typeof(_m) __m = (_m);                 \
+    typeof(_n) _a = (_n) + (__m - 1);      \
+    _a - (_a % __m);                       \
+})
 
-typedef enum allocator_kind {
-    ALLOCATOR_KIND_ARENA,
-} allocator_kind_t;
+#define max(a,b) (((a)>(b))?(a):(b))
+#define min(a,b) (((a)<(b))?(a):(b))
 
-typedef struct allocator_stats {
-    size_t used;
-    size_t reserved;
-    size_t peak;
-} allocator_stats_t;
-
+/*********************************** ARENA ***********************************/
 /* arena allocator */
 typedef struct arena_block arena_block_t ;
 struct arena_block {
@@ -44,6 +46,31 @@ typedef struct arena {
     size_t block_seq;
 } arena_t;
 
+typedef struct arena_marker {
+    arena_block_t *block;
+    size_t offset;
+} arena_marker_t;
+
+typedef struct arena_temp {
+    arena_marker_t marker;
+    arena_t *arena;
+} arena_temp_t;
+/*****************************************************************************/
+
+/********************************** GENERAL **********************************/
+/* allocator definition and allocator_type */
+typedef struct allocator allocator_t;
+
+typedef enum allocator_type {
+    ALLOCATOR_TYPE_ARENA,
+} allocator_type_t;
+
+typedef struct allocator_stats {
+    size_t used;
+    size_t reserved;
+    size_t peak;
+} allocator_stats_t;
+
 /* alloc and free function pointers */
 typedef void *(*alloc_fn)(allocator_t*, size_t n);
 typedef void (*free_fn)(allocator_t*, void *p);
@@ -56,40 +83,59 @@ typedef struct allocator {
          arena_t arena;
     };
     allocator_stats_t stats;
-    allocator_kind_t kind;
-
+    allocator_type_t type;
 } allocator_t;
 
 /* general allocator functions */
-void allocator_dump_stats(allocator_t *a, const char* name);
-
-/* arena allocator functions */
-void  allocator_arena_init(allocator_t *a);
-void  allocator_arena_deinit(allocator_t *a);
-void *allocator_arena_alloc(allocator_t *a, size_t size);
-void  allocator_arena_free(allocator_t *a, void *p);
-void *allocator_arena_realloc(allocator_t *a, void *p);
-void  allocator_arena_reset(allocator_t *a);
+void allocator_init       (allocator_t *a, allocator_type_t type);
+void allocator_deinit     (allocator_t *a);
+void allocator_dump_stats (allocator_t *a, const char* name);
 
 /* allocator helper macros */
 #define allocator_push_array(_a, _T, _n) (_T*)_a->alloc(_a, sizeof(_T)*(_n))
+/*****************************************************************************/
 
-/* helper macros */
-#define round_up_to_multiple(_n, _m) ({    \
-    typeof(_m) __m = (_m);                 \
-    typeof(_n) _a = (_n) + (__m - 1);      \
-    _a - (_a % __m);                       \
-})
+/* arena allocator functions */
+void  allocator_arena_init    (allocator_t *arena);
+void  allocator_arena_deinit  (allocator_t *arena);
+void *allocator_arena_alloc   (allocator_t *arena, size_t size);
+void  allocator_arena_free    (allocator_t *arena, void *p);
+void *allocator_arena_realloc (allocator_t *arena, void *p);
 
-#define max(a,b) (((a)>(b))?(a):(b))
-#define min(a,b) (((a)<(b))?(a):(b))
+/* scratch/temporary arena and snapshot functions */
+void           arena_reset          (arena_t *arena);
+arena_marker_t arena_snapshot       (arena_t *arena);
+void           arena_rewind         (arena_t *arena, arena_marker_t m);
+arena_temp_t   arena_scratch_init   (arena_t *arena);
+void           arena_scratch_deinit (arena_temp_t scratch);
 
 #endif /* ALLOC_H */
 
 
 #ifdef ALLOC_IMPL
-
 /* general allocator functions */
+void allocator_init(allocator_t *a, allocator_type_t type) {
+    switch (type) {
+        case ALLOCATOR_TYPE_ARENA: {
+            allocator_arena_init(a);
+        }
+        break;
+        default:
+        break;
+    }
+}
+
+void allocator_deinit(allocator_t *a) {
+    switch (a->type) {
+        case ALLOCATOR_TYPE_ARENA: {
+            allocator_arena_deinit(a);
+        }
+        break;
+        default:
+        break;
+    }
+}
+
 void allocator_dump_stats(allocator_t *a, const char* name) {
     printf("%s stats:\n", name);
     printf("    Used     : %zu bytes\n", a->stats.used);
@@ -118,9 +164,10 @@ static void arena_block_free(arena_block_t* block) {
 void allocator_arena_init(allocator_t *a) {
     *a = (allocator_t) {
         .alloc = allocator_arena_alloc,
-        .free = allocator_arena_free,
+        .free  = allocator_arena_free,
         .arena = {
-            .start    = NULL,
+            .start     = NULL,
+            .end       = NULL,
             .block_seq = 0,
         },
         .stats = {
@@ -128,12 +175,12 @@ void allocator_arena_init(allocator_t *a) {
             .reserved = 0,
             .used     = 0
         },
-        .kind = ALLOCATOR_KIND_ARENA,
+        .type = ALLOCATOR_TYPE_ARENA,
     };
 }
 
 void allocator_arena_deinit(allocator_t *a) {
-    assert(a->kind == ALLOCATOR_KIND_ARENA);
+    assert(a->type == ALLOCATOR_TYPE_ARENA);
 
     arena_t *arena = &a->arena;
     arena_block_t *block = arena->start;
@@ -156,7 +203,7 @@ void allocator_arena_deinit(allocator_t *a) {
 }
 
 void *allocator_arena_alloc(allocator_t *a, size_t size) {
-    assert(a->kind == ALLOCATOR_KIND_ARENA);
+    assert(a->type == ALLOCATOR_TYPE_ARENA);
 
     arena_t *arena = &a->arena;
     size = round_up_to_multiple(size, MAX_ALIGN);
@@ -221,47 +268,59 @@ void *allocator_arena_alloc(allocator_t *a, size_t size) {
 }
 
 void allocator_arena_free(allocator_t *a, void *p) {
+    assert(a->type == ALLOCATOR_TYPE_ARENA);
     /* NO-OP */
 }
 
-void allocator_arena_reset(allocator_t *a) {
-    arena_t *arena = &a->arena;
+void *allocator_arena_realloc(allocator_t *a, void *p) {
+    assert(a->type == ALLOCATOR_TYPE_ARENA);
+    /* NO-OP */
+}
+
+
+void arena_reset(arena_t *arena) {
     for (arena_block_t* b = arena->start; b != NULL; b = b->next) {
         b->used = 0;
     }
     arena->end = arena->start;
 }
 
-#ifdef ALLOC_DEBUG
-static void arena_block_dump(const arena_block_t *block, size_t n, int verbose) {
-    printf("\nARENA_BLOCK %zu: { size=%zu, used=%zu }\n", n, block->size, block->used);
-    if (verbose == 0) return;
-    for (size_t i = 0; i < block->size; i++) {
-        if (i % 16 == 0) printf("\n%04zu: ", i);
-        printf("%02x ", block->bytes[i]);
+arena_marker_t arena_snapshot(arena_t *arena) {
+    arena_marker_t m;
+    if (arena->end == NULL) {
+        m.block = arena->end;
+        m.offset = 0;
+    } else {
+        m.block = arena->end;
+        m.offset = arena->end->used;
     }
-    printf("\n");
+
+    return m;
 }
 
-static void allocator_arena_dump(allocator_t *a, int verbose) {
-    assert(a->kind == ALLOCATOR_KIND_ARENA);
-
-    arena_t *arena = &a->arena;
-    size_t block_count = arena->block_seq;
-    if (block_count < 1) {
-        printf("ARENA is EMPTY!\n");
+void arena_rewind(arena_t *arena, arena_marker_t m) {
+    if (m.block == NULL) {
+        arena_reset(arena);
+        return;
     }
-    arena_block_t *block = arena->start;
-    for (size_t i = 0; i < block_count; i++) {
-        arena_block_t *next = block->next;
-        arena_block_dump(block, i, verbose);
-        block = next;
+    m.block->used = m.offset;
+    for (arena_block_t *b = m.block->next; b != NULL; b = b->next) {
+        b->used = 0;
     }
+    arena->end = m.block;
 }
 
-#else
-#define arena_block_dump(...)
-#define allocator_arena_dump(...)
-#endif /* ALLOC_DEBUG */
+arena_temp_t arena_scratch_init(arena_t *arena) {
+    arena_marker_t marker = arena_snapshot(arena);
+    arena_temp_t tmp = {
+        .arena  = arena,
+        .marker = marker,
+    };
+    return tmp;
+}
+
+void arena_scratch_deinit(arena_temp_t scratch) {
+    arena_rewind(scratch.arena, scratch.marker);
+}
 
 #endif /* ALLOC_IMPL */

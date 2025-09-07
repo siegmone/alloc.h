@@ -40,7 +40,7 @@ struct arena_block {
 #endif
 
 typedef struct arena {
-    arena_block_t *blocks;
+    arena_block_t *start, *end;
     size_t block_seq;
 } arena_t;
 
@@ -65,9 +65,11 @@ void allocator_dump_stats(allocator_t *a, const char* name);
 
 /* arena allocator functions */
 void  allocator_arena_init(allocator_t *a);
-void  allocator_arena_free(allocator_t *a);
-void  allocator_arena_reset(allocator_t *a, void* ptr);
+void  allocator_arena_deinit(allocator_t *a);
 void *allocator_arena_alloc(allocator_t *a, size_t size);
+void  allocator_arena_free(allocator_t *a, void *p);
+void *allocator_arena_realloc(allocator_t *a, void *p);
+void  allocator_arena_reset(allocator_t *a);
 
 /* allocator helper macros */
 #define allocator_push_array(_a, _T, _n) (_T*)_a->alloc(_a, sizeof(_T)*(_n))
@@ -116,9 +118,9 @@ static void arena_block_free(arena_block_t* block) {
 void allocator_arena_init(allocator_t *a) {
     *a = (allocator_t) {
         .alloc = allocator_arena_alloc,
-        .free = allocator_arena_reset,
+        .free = allocator_arena_free,
         .arena = {
-            .blocks      = NULL,
+            .start    = NULL,
             .block_seq = 0,
         },
         .stats = {
@@ -130,11 +132,11 @@ void allocator_arena_init(allocator_t *a) {
     };
 }
 
-void allocator_arena_free(allocator_t *a) {
+void allocator_arena_deinit(allocator_t *a) {
     assert(a->kind == ALLOCATOR_KIND_ARENA);
 
     arena_t *arena = &a->arena;
-    arena_block_t *block = arena->blocks;
+    arena_block_t *block = arena->start;
     while (block != NULL) {
         arena_block_t *next = block->next;
 
@@ -149,7 +151,7 @@ void allocator_arena_free(allocator_t *a) {
         block = next;
     }
 
-    arena->blocks = NULL;
+    arena->start = NULL;
     arena->block_seq = 0;
 }
 
@@ -158,7 +160,7 @@ void *allocator_arena_alloc(allocator_t *a, size_t size) {
 
     arena_t *arena = &a->arena;
     size = round_up_to_multiple(size, MAX_ALIGN);
-    arena_block_t *block = arena->blocks;
+    arena_block_t *block = arena->start;
     while (block) {
         if (size + block->used <= block->size) {
             /* found block that can hold the memory */
@@ -184,30 +186,27 @@ void *allocator_arena_alloc(allocator_t *a, size_t size) {
         /*************************************************************/
 
         /* allocate next block */
-        arena_block_t *new_block;
         if (size > blocksize) {
             /* if the requested size is greater than the current blocksize
              * just allocate the whole size, eventually the blocksize will grow
              * to handle such sizes */
-            new_block = arena_block_alloc(size);
+            block = arena_block_alloc(size);
         } else {
-            new_block = arena_block_alloc(blocksize);
+            block = arena_block_alloc(blocksize);
         }
 
-        /* TODO: maybe streamline a bit implementing an actual linked list */
         /* push it to the back of block list */
-        if (!arena->blocks) {
-            arena->blocks = new_block;
-            block = arena->blocks;
+        if (!arena->start) {
+            arena->start = block;
         } else {
-            arena_block_t *last = arena->blocks;
+            arena_block_t *last = arena->start;
             while (last->next) last = last->next;
-            last->next = new_block;
-            block = last->next;
+            last->next = block;
         }
+        arena->end = block;
 
         /* update stats */
-        size_t size_bytes = sizeof(arena_block_t) + sizeof(uint8_t) * new_block->size;
+        size_t size_bytes = sizeof(arena_block_t) + sizeof(uint8_t) * block->size;
         a->stats.reserved += size_bytes;
     }
 
@@ -219,12 +218,18 @@ void *allocator_arena_alloc(allocator_t *a, size_t size) {
     a->stats.peak = max(a->stats.peak, a->stats.used);
 
     return ptr;
-
-
 }
 
-void allocator_arena_reset(allocator_t *a, void* ptr) {
-    /* TODO: idk if to implement it or not */
+void allocator_arena_free(allocator_t *a, void *p) {
+    /* NO-OP */
+}
+
+void allocator_arena_reset(allocator_t *a) {
+    arena_t *arena = &a->arena;
+    for (arena_block_t* b = arena->start; b != NULL; b = b->next) {
+        b->used = 0;
+    }
+    arena->end = arena->start;
 }
 
 #ifdef ALLOC_DEBUG
@@ -246,7 +251,7 @@ static void allocator_arena_dump(allocator_t *a, int verbose) {
     if (block_count < 1) {
         printf("ARENA is EMPTY!\n");
     }
-    arena_block_t *block = arena->blocks;
+    arena_block_t *block = arena->start;
     for (size_t i = 0; i < block_count; i++) {
         arena_block_t *next = block->next;
         arena_block_dump(block, i, verbose);
@@ -257,6 +262,6 @@ static void allocator_arena_dump(allocator_t *a, int verbose) {
 #else
 #define arena_block_dump(...)
 #define allocator_arena_dump(...)
-#endif ALLOC_DEBUG
+#endif /* ALLOC_DEBUG */
 
 #endif /* ALLOC_IMPL */

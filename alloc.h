@@ -11,6 +11,8 @@
 /* TODO(September 07, 2025): replace all asserts with logging and early safe returns */
 /* TODO(September 07, 2025): shorten the 'allocator_' prefix of functions, like 'alloc_' or even 'a_' or 'alc_' */
 /* TODO(September 07, 2025): add 'realloc' for all types of allocators */
+/* TODO(September 08, 2025): make a default allocator */
+/* TODO(September 08, 2025): implement freelist */
 
 /* define alignment size */
 #define MAX_ALIGN (alignof(max_align_t))
@@ -96,13 +98,13 @@ void allocator_dump_stats (allocator_t *a, const char* name);
 /*****************************************************************************/
 
 /* arena allocator functions */
-void  allocator_arena_init    (allocator_t *arena);
-void  allocator_arena_deinit  (allocator_t *arena);
 void *allocator_arena_alloc   (allocator_t *arena, size_t size);
 void  allocator_arena_free    (allocator_t *arena, void *p);
 void *allocator_arena_realloc (allocator_t *arena, void *p);
 
-/* scratch/temporary arena and snapshot functions */
+/* arena specific and scratch/temporary arena, snapshot functions */
+void           arena_init           (arena_t *arena);
+void           arena_deinit         (arena_t *arena);
 void           arena_reset          (arena_t *arena);
 arena_marker_t arena_snapshot       (arena_t *arena);
 void           arena_rewind         (arena_t *arena, arena_marker_t m);
@@ -115,9 +117,19 @@ void           arena_scratch_deinit (arena_temp_t scratch);
 #ifdef ALLOC_IMPL
 /* general allocator functions */
 void allocator_init(allocator_t *a, allocator_type_t type) {
+    *a = (allocator_t){
+        .stats = {
+            .peak     = 0,
+            .reserved = 0,
+            .used     = 0,
+        },
+        .type = type,
+    };
     switch (type) {
         case ALLOCATOR_TYPE_ARENA: {
-            allocator_arena_init(a);
+            a->alloc = allocator_arena_alloc;
+            a->free  = allocator_arena_free;
+            arena_init(&a->arena);
         }
         break;
         default:
@@ -128,11 +140,16 @@ void allocator_init(allocator_t *a, allocator_type_t type) {
 void allocator_deinit(allocator_t *a) {
     switch (a->type) {
         case ALLOCATOR_TYPE_ARENA: {
-            allocator_arena_deinit(a);
+            arena_deinit(&a->arena);
         }
         break;
         default:
         break;
+    }
+    /* update stats */
+    {
+        a->stats.used = 0;
+        a->stats.reserved = 0;
     }
 }
 
@@ -161,38 +178,16 @@ static void arena_block_free(arena_block_t* block) {
     free(block);
 }
 
-void allocator_arena_init(allocator_t *a) {
-    *a = (allocator_t) {
-        .alloc = allocator_arena_alloc,
-        .free  = allocator_arena_free,
-        .arena = {
-            .start     = NULL,
-            .end       = NULL,
-            .block_seq = 0,
-        },
-        .stats = {
-            .peak     = 0,
-            .reserved = 0,
-            .used     = 0
-        },
-        .type = ALLOCATOR_TYPE_ARENA,
-    };
+void arena_init(arena_t *arena) {
+    arena->block_seq = 0;
+    arena->start     = NULL;
+    arena->end       = arena->start;
 }
 
-void allocator_arena_deinit(allocator_t *a) {
-    assert(a->type == ALLOCATOR_TYPE_ARENA);
-
-    arena_t *arena = &a->arena;
+void arena_deinit(arena_t *arena) {
     arena_block_t *block = arena->start;
     while (block != NULL) {
         arena_block_t *next = block->next;
-
-        /* update stats */
-        {
-            size_t size_bytes = sizeof(arena_block_t) + sizeof(uint8_t) * block->size;
-            a->stats.used -= block->used;
-            a->stats.reserved -= size_bytes;
-        }
 
         arena_block_free(block);
         block = next;
@@ -275,6 +270,7 @@ void allocator_arena_free(allocator_t *a, void *p) {
 void *allocator_arena_realloc(allocator_t *a, void *p) {
     assert(a->type == ALLOCATOR_TYPE_ARENA);
     /* NO-OP */
+    return p;
 }
 
 

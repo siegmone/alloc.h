@@ -51,6 +51,9 @@ void allocator_init       (allocator_t *a, allocator_type_t type);
 void allocator_deinit     (allocator_t *a);
 void allocator_dump_stats (allocator_t *a, const char* name);
 
+void *mem_alloc (allocator_t *a, size_t size);
+void mem_free  (allocator_t *a, void *p);
+
 /* allocator helper macros */
 #define allocator_push_array(_a, _T, _n) (_T*)_a->alloc(_a, sizeof(_T)*(_n))
 #define allocator_push_struct(_a, _T)    allocator_push_array(_a, _T, 1)
@@ -136,6 +139,14 @@ void allocator_arena_free(allocator_t *a, void *p) {
 
 void *allocator_arena_realloc(allocator_t *a, void *p) {
     return arena_realloc(&a->arena, p);
+}
+
+void *mem_alloc(allocator_t *a, size_t size) {
+    return a->alloc(a, size);
+}
+
+void mem_free(allocator_t *a, void *p) {
+    a->free(a, p);
 }
 
 #endif /* ALLOC_IMPL */

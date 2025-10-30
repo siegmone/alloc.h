@@ -79,8 +79,6 @@ static arena_block_t *arena_block_alloc(size_t size) {
 
 static void arena_block_free(arena_block_t* block) {
     assert(block != NULL);
-    printf("i want to be free\n");
-
     free(block);
 }
 
